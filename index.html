@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>お絵描き人狼</title>
+  <style>
+    body { font-family: 'Helvetica Neue', Arial, sans-serif; background-color: #f4f6f9; color: #333; margin: 0; padding: 20px; text-align: center; }
+    .card { background: white; max-width: 600px; margin: 0 auto 20px; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    button { background-color: #4CAF50; color: white; border: none; padding: 10px 20px; font-size: 16px; border-radius: 6px; cursor: pointer; margin: 5px; }
+    button:disabled { background-color: #ccc; cursor: not-allowed; }
+    input[type="text"] { padding: 8px; font-size: 16px; border-radius: 4px; border: 1px solid #ccc; }
+    .icon-picker span { font-size: 28px; cursor: pointer; padding: 5px; border-radius: 50%; display: inline-block; }
+    .icon-picker span.selected { background-color: #e0e0e0; border: 2px solid #4CAF50; }
+    .player-list { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin: 15px 0; }
+    .player-item { background: #eee; padding: 8px 12px; border-radius: 20px; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+    .player-item.active { border: 2px solid #ff9800; background: #fff3e0; font-weight: bold; }
+    #canvas { border: 2px solid #333; border-radius: 8px; background: white; cursor: crosshair; touch-action: none; }
+    .topic-box { background: #e8f5e9; border: 1px solid #a5d6a7; padding: 10px; border-radius: 6px; font-size: 18px; font-weight: bold; margin: 10px 0; }
+  </style>
+</head>
+<body>
+
+  <h1>🎨 お絵描き人狼 🐺</h1>
+
+  <!-- ルーム参加 / プロフィール設定画面 -->
+  <div id="join-screen" class="card">
+    <h2>プレイヤー設定</h2>
+    <div style="margin-bottom: 15px;">
+      <label>名前: </label>
+      <input type="text" id="player-name" placeholder="なまえを入力">
+    </div>
+    <div>
+      <label>アイコン選択:</label>
+      <div class="icon-picker" id="icon-picker">
+        <span class="selected">🐶</span><span>🐱</span><span>🐰</span><span>🦊</span><span>🐻</span><span>🐼</span><span>🦁</span><span>🐸</span>
+      </div>
+    </div>
+    <br>
+    <button id="join-btn">ルームに参加する</button>
+  </div>
+
+  <!-- メインゲーム画面 -->
+  <div id="game-screen" class="card" style="display: none;">
+    <div>
+      <p>ルームID: <b id="display-room-id"></b></p>
+      <p style="font-size: 12px; color: #666;">このURLを一緒に遊ぶ人に共有してください</p>
+    </div>
+
+    <div class="player-list" id="player-list"></div>
+
+    <div id="host-controls" style="display: none;">
+      <input type="text" id="custom-topic" placeholder="お題を入力 (空欄でランダム)">
+      <button id="start-game-btn">ゲーム開始</button>
+    </div>
+
+    <div class="topic-box" id="topic-display">ゲーム開始を待っています...</div>
+    <div id="turn-display" style="font-weight: bold; margin: 5px 0; color: #d32f2f;"></div>
+
+    <canvas id="canvas" width="400" height="400"></canvas>
+  </div>
+
+  <!-- Firebase SDK の読み込み -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getFirestore, doc, setDoc, onSnapshot, updateDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+    // 1. YOUR FIREBASE CONFIG
+    const firebaseConfig = {
+      apiKey: "AIzaSyA9Xqk7Gwyufbob6HITSxc9fBaRMsUz62Y",
+      authDomain: "oekaki-jinro-61e57.firebaseapp.com",
+      projectId: "oekaki-jinro-61e57",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // デフォルトのお題リスト
+    const defaultTopics = ["ラーメン", "富士山", "ドラえもん", "サッカー", "遊園地", "新幹線", "クリスマスツリー", "ペンギン"];
+
+    // URLパラメータからルームIDを取得、なければランダム生成
+    const urlParams = new URLSearchParams(window.location.search);
+    let roomId = urlParams.get('room');
+    if (!roomId) {
+      roomId = Math.random().toString(36).substring(2, 8);
+      window.history.replaceState({}, '', `?room=${roomId}`);
+    }
+    document.getElementById('display-room-id').innerText = roomId;
+
+    let myId = localStorage.getItem('player_id') || Math.random().toString(36).substring(2, 9);
+    localStorage.setItem('player_id', myId);
+
+    let selectedIcon = "🐶";
+    let gameState = null;
+    let isDrawing = false;
+    let currentStroke = [];
+
+    // アイコン選択処理
+    const iconSpans = document.querySelectorAll('#icon-picker span');
+    iconSpans.forEach(span => {
+      span.addEventListener('click', () => {
+        iconSpans.forEach(s => s.classList.remove('selected'));
+        span.classList.add('selected');
+        selectedIcon = span.innerText;
+      });
+    });
+
+    // キャンバス設定
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#000';
+
+    // 参加ボタン
+    document.getElementById('join-btn').addEventListener('click', async () => {
+      const name = document.getElementById('player-name').value.trim() || "名無し";
+      document.getElementById('join-screen').style.display = 'none';
+      document.getElementById('game-screen').style.display = 'block';
+
+      // リアルタイム同期の開始
+      const roomRef = doc(db, "rooms", roomId);
+      
+      onSnapshot(roomRef, (docSnap) => {
+        if (!docSnap.exists()) {
+          // 初期化
+          setDoc(roomRef, {
+            players: [{ id: myId, name: name, icon: selectedIcon, order: 0 }],
+            hostId: myId,
+            status: 'waiting',
+            lines: [],
+            currentTurnIndex: 0,
+            round: 1,
+            fakeId: '',
+            topic: ''
+          });
+        } else {
+          gameState = docSnap.data();
+          updateUI();
+          renderCanvas();
+        }
+      });
+
+      // 自分をプレイヤーに追加
+      setTimeout(async () => {
+        if (gameState) {
+          const exists = gameState.players.some(p => p.id === myId);
+          if (!exists && gameState.players.length < 10) {
+            const updatedPlayers = [...gameState.players, { id: myId, name: name, icon: selectedIcon, order: 0 }];
+            await updateDoc(roomRef, { players: updatedPlayers });
+          }
+        }
+      }, 500);
+    });
+
+    // UI更新処理
+    function updateUI() {
+      if (!gameState) return;
+
+      // ホスト権限の確認
+      const isHost = gameState.hostId === myId;
+      document.getElementById('host-controls').style.display = (isHost && gameState.status !== 'playing') ? 'block' : 'none';
+
+      // プレイヤー一覧
+      const listEl = document.getElementById('player-list');
+      listEl.innerHTML = '';
+      
+      // 順番順にソート（ゲーム中）
+      let displayPlayers = [...gameState.players];
+      if (gameState.status === 'playing') {
+        displayPlayers.sort((a, b) => a.order - b.order);
+      }
+
+      displayPlayers.forEach((p, index) => {
+        const item = document.createElement('div');
+        const isCurrentTurn = gameState.status === 'playing' && gameState.players[gameState.currentTurnIndex]?.id === p.id;
+        item.className = `player-item ${isCurrentTurn ? 'active' : ''}`;
+        
+        const orderBadge = gameState.status === 'playing' ? `[${p.order + 1}番] ` : '';
+        item.innerText = `${orderBadge}${p.icon} ${p.name}`;
+        listEl.appendChild(item);
+      });
+
+      // 役割とお題の表示
+      const topicEl = document.getElementById('topic-display');
+      const turnEl = document.getElementById('turn-display');
+
+      if (gameState.status === 'playing') {
+        if (myId === gameState.fakeId) {
+          topicEl.innerText = "あなたは【エセ芸術家（人狼）】です！正体がバレないように描いてください。";
+          topicEl.style.backgroundColor = "#ffebee";
+        } else {
+          topicEl.innerText = `お題: 【 ${gameState.topic} 】`;
+          topicEl.style.backgroundColor = "#e8f5e9";
+        }
+
+        const activePlayer = gameState.players[gameState.currentTurnIndex];
+        if (activePlayer.id === myId) {
+          turnEl.innerText = `👉 あなたの番です！一筆描いてください (${gameState.round}/2周目)`;
+        } else {
+          turnEl.innerText = `${activePlayer.name} さんが描いています... (${gameState.round}/2周目)`;
+        }
+      } else if (gameState.status === 'finished') {
+        topicEl.innerText = `ゲーム終了！ お題は「${gameState.topic}」でした。`;
+        turnEl.innerText = "みんなで相談してエセ芸術家を当ててください！";
+      }
+    }
+
+    // ゲーム開始ボタン (ホストのみ)
+    document.getElementById('start-game-btn').addEventListener('click', async () => {
+      const playersCount = gameState.players.length;
+      if (playersCount < 3) {
+        alert("ゲームを開始するには最低3人必要です。");
+        return;
+      }
+
+      // 順番とエセをランダム決定
+      const shuffledIndices = Array.from({length: playersCount}, (_, i) => i).sort(() => Math.random() - 0.5);
+      const fakeIndex = Math.floor(Math.random() * playersCount);
+
+      const updatedPlayers = gameState.players.map((p, idx) => ({
+        ...p,
+        order: shuffledIndices[idx]
+      }));
+
+      // 描く順番通りにソートして配列を格納
+      updatedPlayers.sort((a, b) => a.order - b.order);
+
+      const customTopic = document.getElementById('custom-topic').value.trim();
+      const topic = customTopic || defaultTopics[Math.floor(Math.random() * defaultTopics.length)];
+
+      const roomRef = doc(db, "rooms", roomId);
+      await updateDoc(roomRef, {
+        players: updatedPlayers,
+        fakeId: updatedPlayers[fakeIndex].id,
+        topic: topic,
+        status: 'playing',
+        currentTurnIndex: 0,
+        round: 1,
+        lines: []
+      });
+    });
+
+    // お絵描き機能（一筆書き判定）
+    function getPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      return { x: clientX - rect.left, y: clientY - rect.top };
+    }
+
+    function startDrawing(e) {
+      if (!gameState || gameState.status !== 'playing') return;
+      const activePlayer = gameState.players[gameState.currentTurnIndex];
+      if (activePlayer.id !== myId) return; // 自分の番でなければ描けない
+
+      isDrawing = true;
+      currentStroke = [getPos(e)];
+    }
+
+    function draw(e) {
+      if (!isDrawing) return;
+      const pos = getPos(e);
+      currentStroke.push(pos);
+
+      // ローカルで即時描画
+      ctx.beginPath();
+      const lastPos = currentStroke[currentStroke.length - 2];
+      ctx.moveTo(lastPos.x, lastPos.y);
+      ctx.lineTo(pos.x, pos.y);
+      ctx.stroke();
+    }
+
+    async function stopDrawing() {
+      if (!isDrawing) return;
+      isDrawing = false;
+
+      if (currentStroke.length > 0) {
+        const newLines = [...(gameState.lines || []), currentStroke];
+        let nextTurn = gameState.currentTurnIndex + 1;
+        let nextRound = gameState.round;
+        let nextStatus = 'playing';
+
+        //全員描き終わったら次の周へ
+        if (nextTurn >= gameState.players.length) {
+          nextTurn = 0;
+          nextRound += 1;
+        }
+
+        // 2周終わったらゲーム終了
+        if (nextRound > 2) {
+          nextStatus = 'finished';
+        }
+
+        const roomRef = doc(db, "rooms", roomId);
+        await updateDoc(roomRef, {
+          lines: newLines,
+          currentTurnIndex: nextTurn,
+          round: nextRound,
+          status: nextStatus
+        });
+      }
+      currentStroke = [];
+    }
+
+    canvas.addEventListener('mousedown', startDrawing);
+    canvas.addEventListener('mousemove', draw);
+    canvas.addEventListener('mouseup', stopDrawing);
+
+    canvas.addEventListener('touchstart', startDrawing);
+    canvas.addEventListener('touchmove', draw);
+    canvas.addEventListener('touchend', stopDrawing);
+
+    // キャンバスの再描画
+    function renderCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (!gameState || !gameState.lines) return;
+
+      gameState.lines.forEach(line => {
+        if (line.length < 2) return;
+        ctx.beginPath();
+        ctx.moveTo(line[0].x, line[0].y);
+        for (let i = 1; i < line.length; i++) {
+          ctx.lineTo(line[i].x, line[i].y);
+        }
+        ctx.stroke();
+      });
+    }
+  </script>
+</body>
+</html>
